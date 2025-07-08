@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>WhatsApp QR Code</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        text-align: center;
+        margin-top: 40px;
+      }
+      .qr {
+        margin: 20px auto;
+      }
+      .info {
+        margin-top: 20px;
+        color: #555;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Scan this QR Code with WhatsApp</h1>
+    <% if (qr) { %>
+    <div class="qr">
+      <img
+        src="https://api.qrserver.com/v1/create-qr-code/?data=<%= encodeURIComponent(qr) %>&amp;size=300x300"
+        alt="QR Code"
+      />
+    </div>
+    <div class="info">Open WhatsApp &gt; Linked Devices &gt; Link a Device</div>
+    <% } else { %>
+    <div class="info">
+      No QR code available. Please try again or refresh the page.
+    </div>
+    <% } %>
+  </body>
+</html>
