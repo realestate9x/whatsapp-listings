@@ -8,7 +8,8 @@ yarn-debug.log*
 yarn-error.log*
 
 # Baileys auth/session
-auth_info_baileys/
+auth_info_baileys*/
+whatsapp-state/
 
 # VSCode
 .vscode/
