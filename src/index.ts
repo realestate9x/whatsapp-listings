@@ -29,7 +29,7 @@ const app = express();
 // Enable CORS for frontend
 app.use(
   cors({
-    origin: "sparkly-speculoos-152e2d.netlify.app",
+    origin: "https://realestateli.netlify.app/",
     credentials: true,
   })
 );
