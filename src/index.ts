@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Request, Response } from "express";
 import cors from "cors";
 import pino from "pino";
 import pinoHttp from "pino-http";
@@ -29,7 +29,7 @@ const app = express();
 // Enable CORS for frontend
 app.use(
   cors({
-    origin: "http://localhost:8080",
+    origin: "sparkly-speculoos-152e2d.netlify.app",
     credentials: true,
   })
 );
@@ -188,6 +188,111 @@ app.get("/admin/whatsapp-services", (req, res) => {
     console.error("Error getting all services status:", error);
     res.status(500).json({
       error: "Failed to get services status",
+    });
+  }
+});
+
+// =============================================================================
+// AUTHENTICATION ENDPOINTS (for development and testing)
+// =============================================================================
+
+// Simple login endpoint - generates JWT token
+app.post("/login", (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    // Simple validation (in production, check against database)
+    if (!email || !password) {
+      return res.status(400).json({
+        error: "Email and password are required"
+      });
+    }
+
+    // For demo purposes, accept any email/password combination
+    // In production, validate against your database
+    const userId = `user-${email.replace(/[^a-zA-Z0-9]/g, '')}`;
+    
+    const jwt = require('jsonwebtoken');
+    const token = jwt.sign({
+      iss: "realestate-app",
+      sub: userId,
+      aud: "authenticated",
+      email: email,
+      role: "user",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60), // 24 hours
+      is_anonymous: false,
+    }, process.env.JWT_SECRET || 'your-secret-key');
+
+    return res.json({
+      success: true,
+      token: token,
+      user: {
+        id: userId,
+        email: email,
+        role: "user"
+      },
+      message: "Login successful"
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    return res.status(500).json({ error: "Login failed" });
+  }
+});
+
+// Get test token endpoint (for development)
+app.get("/get-test-token", (req, res) => {
+  try {
+    const jwt = require('jsonwebtoken');
+    const testUser = {
+      iss: "realestate-app",
+      sub: "test-user-12345",
+      aud: "authenticated",
+      email: "test@example.com",
+      role: "user",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60), // 24 hours
+      is_anonymous: false,
+    };
+
+    const token = jwt.sign(testUser, process.env.JWT_SECRET || 'your-secret-key');
+    
+    return res.json({
+      token: token,
+      user: testUser,
+      usage: {
+        description: "Use this token in Authorization header as 'Bearer <token>'",
+        curl_example: `curl -H "Authorization: Bearer ${token}" http://localhost:3000/start-whatsapp`,
+        browser_example: "Add 'Authorization: Bearer <token>' header to your requests"
+      }
+    });
+  } catch (error) {
+    console.error("Error generating test token:", error);
+    return res.status(500).json({ error: "Failed to generate test token" });
+  }
+});
+
+// Test WhatsApp endpoint without authentication (for quick testing)
+app.get("/test-whatsapp", async (req: Request, res: Response) => {
+  try {
+    console.log("🧪 Test WhatsApp endpoint accessed (no auth required)");
+    
+    const testUserId = "test-user-12345";
+    const userService = whatsappServiceManager.getServiceForUser(testUserId);
+    const result = await userService.initializeIfNeeded();
+    
+    return res.json({
+      ...result,
+      user_id: testUserId,
+      note: "This is a test endpoint - use /start-whatsapp with proper authentication for production"
+    });
+  } catch (error) {
+    console.error("Error in test WhatsApp endpoint:", error);
+    return res.status(500).json({
+      status: "error",
+      message: "Failed to start test WhatsApp connection",
+      isConnected: false,
+      qrCode: null,
     });
   }
 });

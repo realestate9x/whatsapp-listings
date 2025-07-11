@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: whatsapp-listings-backend
+    env: node
+    rootDir: realestate_listing/whatsapp-listings
+    plan: free
+    buildCommand: "npm install && npm run build"
+    startCommand: "npm run start"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true # Render will generate a secure secret 
