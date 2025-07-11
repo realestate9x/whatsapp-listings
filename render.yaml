@@ -2,7 +2,7 @@ services:
   - type: web
     name: whatsapp-listings-backend
     env: node
-    rootDir: realestate_listing/whatsapp-listings
+    rootDir: realestate9x/whatsapp-listings
     plan: free
     buildCommand: "npm install && npm run build"
     startCommand: "npm run start"
