@@ -31,8 +31,9 @@ app.use(
   cors({
     origin: [
       "https://realestateli.netlify.app",
-      "https://realestateli.netlify.app/",
+      "https://6871598a62471100087cf31a--realestateli.netlify.app",
       "http://localhost:8080",
+      "http://localhost:5173",
     ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
