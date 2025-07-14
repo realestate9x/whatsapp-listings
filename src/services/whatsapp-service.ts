@@ -10,7 +10,7 @@ import path from "path";
 import fs from "fs";
 
 export class WhatsAppService {
-  private targetGroups: string[] = ["test", "Real Estate Connect"];
+  private targetGroups: string[] = []; // Will be loaded from database
   private sock: WASocket | undefined;
   private latestQR: string | null = null;
   private isConnected: boolean = false;
@@ -21,8 +21,15 @@ export class WhatsAppService {
 
   constructor(userId: string) {
     this.userId = userId;
-    // Load persisted state on startup
+    // Load persisted state and user preferences on startup
     this.loadPersistedState();
+    // Load user preferences async (don't await in constructor)
+    this.loadUserGroupPreferences().catch((error) => {
+      console.error(
+        "Failed to load user group preferences in constructor:",
+        error
+      );
+    });
   }
 
   private saveStateToFile() {
@@ -175,6 +182,11 @@ export class WhatsAppService {
         console.log(
           `👂 Now listening for messages from target groups for user ${this.userId}...`
         );
+
+        // Reload user preferences when connection is established
+        this.loadUserGroupPreferences().catch((error) => {
+          console.error("Failed to load user group preferences:", error);
+        });
       }
 
       // Save state on every connection update
@@ -285,11 +297,15 @@ export class WhatsAppService {
       const groupMetadata = await sock.groupMetadata(msg.key.remoteJid);
       const groupName = groupMetadata.subject;
 
-      console.log(`📝 Group: "${groupName}", Type: ${type}`);
+      console.log(
+        `📝 Group: "${groupName}" (${msg.key.remoteJid}), Type: ${type}`
+      );
 
-      // Check if this is a target group
+      // Check if this is a target group (check both group ID and group name for backward compatibility)
       const isTargetGroup = this.targetGroups.some(
-        (target) => groupName.toLowerCase() === target.toLowerCase()
+        (target) =>
+          target === msg.key.remoteJid ||
+          groupName.toLowerCase() === target.toLowerCase()
       );
 
       if (!isTargetGroup) {
@@ -305,6 +321,9 @@ export class WhatsAppService {
       // Safely serialize the message content to avoid JSON serialization issues
       const serializedMessage = this.serializeMessage(msg.message);
 
+      // Extract plain text from message for efficient searching
+      const messageText = this.extractMessageText(msg.message);
+
       const messageData: WhatsAppMessage = {
         user_id: this.userId, // Store messages for this specific user
         timestamp: new Date(
@@ -313,7 +332,8 @@ export class WhatsAppService {
         group_id: msg.key.remoteJid,
         group_name: groupName,
         sender: msg.key.participant || "unknown",
-        message: serializedMessage,
+        message_text: messageText,
+        message_meta: serializedMessage,
       };
 
       // Store in Supabase for ALL users to access
@@ -322,6 +342,9 @@ export class WhatsAppService {
           user_id: messageData.user_id,
           group_name: messageData.group_name,
           sender: messageData.sender,
+          message_text:
+            messageText.substring(0, 50) +
+            (messageText.length > 50 ? "..." : ""),
           messageKeys: Object.keys(messageData),
         });
 
@@ -351,8 +374,7 @@ export class WhatsAppService {
 
       // Always log to console
       console.log(
-        `[${messageType}] [${messageData.timestamp}] [${messageData.group_name}] [${messageData.sender}]`,
-        msg.message
+        `[${messageType}] [${messageData.timestamp}] [${messageData.group_name}] [${messageData.sender}]: ${messageText}`
       );
     } catch (error) {
       console.error(
@@ -431,6 +453,209 @@ export class WhatsAppService {
         return { text: message.extendedTextMessage.text };
       }
       return { error: "Failed to serialize message", type: typeof message };
+    }
+  }
+
+  // Extract plain text from WhatsApp message object
+  private extractMessageText(message: any): string {
+    if (!message) return "[Empty Message]";
+
+    try {
+      // Simple conversation messages
+      if (message.conversation) {
+        return message.conversation;
+      }
+
+      // Extended text messages
+      if (message.extendedTextMessage?.text) {
+        return message.extendedTextMessage.text;
+      }
+
+      // Image messages with captions
+      if (message.imageMessage?.caption) {
+        return `[Image] ${message.imageMessage.caption}`;
+      }
+
+      // Video messages with captions
+      if (message.videoMessage?.caption) {
+        return `[Video] ${message.videoMessage.caption}`;
+      }
+
+      // Document messages
+      if (message.documentMessage?.fileName) {
+        return `[Document] ${message.documentMessage.fileName}`;
+      }
+
+      // Audio messages
+      if (message.audioMessage) {
+        return "[Audio Message]";
+      }
+
+      // Image messages without captions
+      if (message.imageMessage) {
+        return "[Image]";
+      }
+
+      // Video messages without captions
+      if (message.videoMessage) {
+        return "[Video]";
+      }
+
+      // Contact messages
+      if (message.contactMessage?.displayName) {
+        return `[Contact] ${message.contactMessage.displayName}`;
+      }
+
+      // Location messages
+      if (message.locationMessage) {
+        return "[Location]";
+      }
+
+      // Sticker messages
+      if (message.stickerMessage) {
+        return "[Sticker]";
+      }
+
+      // Reaction messages
+      if (message.reactionMessage) {
+        return `[Reaction] ${message.reactionMessage.text || "👍"}`;
+      }
+
+      // Poll messages
+      if (message.pollCreationMessage) {
+        return `[Poll] ${message.pollCreationMessage.name || "Poll"}`;
+      }
+
+      // Default fallback
+      return "[Unknown Message Type]";
+    } catch (error) {
+      console.warn("Failed to extract message text:", error);
+      return "[Error extracting message]";
+    }
+  }
+
+  // Load user group preferences from database
+  private async loadUserGroupPreferences() {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("user_group_preferences")
+        .select("group_id, group_name")
+        .eq("user_id", this.userId)
+        .eq("is_enabled", true);
+
+      if (error) {
+        console.warn(
+          `Failed to load group preferences for user ${this.userId}:`,
+          error
+        );
+        // Fall back to default groups if database query fails
+        this.targetGroups = ["test", "Real Estate Connect"];
+        return;
+      }
+
+      if (data && data.length > 0) {
+        // Store group IDs for efficient matching
+        this.targetGroups = data.map((row) => row.group_id);
+        console.log(
+          `📂 Loaded ${this.targetGroups.length} target groups for user ${this.userId}:`,
+          data.map((row) => `${row.group_name} (${row.group_id})`)
+        );
+      } else {
+        // No preferences set yet, use default groups (these will be group names until user sets preferences)
+        this.targetGroups = ["test", "Real Estate Connect"];
+        console.log(
+          `📂 No group preferences found for user ${this.userId}, using defaults:`,
+          this.targetGroups
+        );
+      }
+    } catch (error) {
+      console.error(
+        `Error loading group preferences for user ${this.userId}:`,
+        error
+      );
+      // Fall back to default groups
+      this.targetGroups = ["test", "Real Estate Connect"];
+    }
+  }
+
+  // Get available groups that the user can select from (based on their WhatsApp groups)
+  async getAvailableGroups(): Promise<
+    { group_id: string; group_name: string }[]
+  > {
+    if (!this.sock || !this.isConnected) {
+      throw new Error("WhatsApp not connected");
+    }
+
+    try {
+      // Get all groups the user is part of
+      const groups = await this.sock.groupFetchAllParticipating();
+
+      return Object.keys(groups).map((groupId) => ({
+        group_id: groupId,
+        group_name: groups[groupId].subject || "Unknown Group",
+      }));
+    } catch (error) {
+      console.error("Error fetching available groups:", error);
+      throw error;
+    }
+  }
+
+  // Get user's current group preferences
+  async getUserGroupPreferences(): Promise<
+    { group_id: string; group_name: string; is_enabled: boolean }[]
+  > {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("user_group_preferences")
+        .select("group_id, group_name, is_enabled")
+        .eq("user_id", this.userId);
+
+      if (error) {
+        console.error("Error fetching user group preferences:", error);
+        return [];
+      }
+
+      return data || [];
+    } catch (error) {
+      console.error("Error fetching user group preferences:", error);
+      return [];
+    }
+  }
+
+  // Update user group preferences
+  async updateUserGroupPreferences(
+    preferences: { group_id: string; group_name: string; is_enabled: boolean }[]
+  ): Promise<void> {
+    try {
+      // Delete existing preferences for this user
+      await supabaseAdmin
+        .from("user_group_preferences")
+        .delete()
+        .eq("user_id", this.userId);
+
+      // Insert new preferences
+      const insertData = preferences.map((pref) => ({
+        user_id: this.userId,
+        group_id: pref.group_id,
+        group_name: pref.group_name,
+        is_enabled: pref.is_enabled,
+      }));
+
+      const { error } = await supabaseAdmin
+        .from("user_group_preferences")
+        .insert(insertData);
+
+      if (error) {
+        throw error;
+      }
+
+      // Reload the target groups
+      await this.loadUserGroupPreferences();
+
+      console.log(`✅ Updated group preferences for user ${this.userId}`);
+    } catch (error) {
+      console.error("Error updating user group preferences:", error);
+      throw error;
     }
   }
 }

@@ -56,7 +56,8 @@ export interface WhatsAppMessage {
   group_id: string;
   group_name: string;
   sender: string;
-  message: any;
+  message_text?: string;
+  message_meta: any;
   created_at?: string;
 }
 
@@ -72,6 +73,16 @@ export interface WhatsAppKeys {
   key_type: string;
   key_id: string;
   key_data: any;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface UserGroupPreference {
+  id?: string;
+  user_id: string;
+  group_id: string;
+  group_name: string;
+  is_enabled: boolean;
   created_at?: string;
   updated_at?: string;
 }

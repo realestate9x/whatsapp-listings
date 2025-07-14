@@ -18,7 +18,8 @@ CREATE TABLE public.whatsapp_messages (
     group_id text NOT NULL,
     group_name text NOT NULL,
     sender text NOT NULL,
-    message jsonb NOT NULL,
+    message_text text,
+    message_meta jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
     CONSTRAINT whatsapp_messages_pkey PRIMARY KEY (id)
     -- Note: No foreign key constraint to allow system UUID
@@ -50,13 +51,14 @@ CREATE TABLE public.whatsapp_keys (
 CREATE TABLE public.user_group_preferences (
     id uuid NOT NULL DEFAULT uuid_generate_v4(),
     user_id uuid NOT NULL,
+    group_id text NOT NULL,
     group_name text NOT NULL,
     is_enabled boolean DEFAULT true,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
     CONSTRAINT user_group_preferences_pkey PRIMARY KEY (id),
     CONSTRAINT user_group_preferences_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE,
-    CONSTRAINT user_group_preferences_user_group_unique UNIQUE (user_id, group_name)
+    CONSTRAINT user_group_preferences_user_group_unique UNIQUE (user_id, group_id)
 );
 
 -- Create indexes for better performance
@@ -66,6 +68,9 @@ CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_group_name ON public.whatsapp_m
 CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_timestamp ON public.whatsapp_messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_user_group_timestamp ON public.whatsapp_messages(user_id, group_name, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_whatsapp_keys_user_type ON public.whatsapp_keys(user_id, key_type);
+
+-- Full-text search index for message content
+CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_text_search ON public.whatsapp_messages USING gin(to_tsvector('english', message_text));
 
 -- Enable Row Level Security (RLS)
 ALTER TABLE public.whatsapp_messages ENABLE ROW LEVEL SECURITY;
