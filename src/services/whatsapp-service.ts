@@ -150,12 +150,11 @@ export class WhatsAppService {
       if (connection === "close") {
         this.isConnected = false;
         console.log(`❌ WhatsApp connection closed for user ${this.userId}`);
-        const disconnectError = (lastDisconnect?.error as any);
-        console.error('🛑 Connection closed due to:', disconnectError);
-        
+        const disconnectError = lastDisconnect?.error as any;
+        console.error("🛑 Connection closed due to:", disconnectError);
+
         const shouldReconnect =
-          disconnectError?.output?.statusCode !==
-          DisconnectReason.loggedOut;
+          disconnectError?.output?.statusCode !== DisconnectReason.loggedOut;
         if (shouldReconnect) {
           console.log(`🔄 Attempting to reconnect user ${this.userId}...`);
           this.scheduleReconnect();
