@@ -245,6 +245,9 @@ router.get("/properties", jwtMiddleware, async (req, res) => {
       bedrooms: req.query.bedrooms
         ? parseInt(req.query.bedrooms as string)
         : undefined,
+      floor_number: req.query.floor_number
+        ? parseInt(req.query.floor_number as string)
+        : undefined,
       min_parking_count: req.query.min_parking_count
         ? parseInt(req.query.min_parking_count as string)
         : undefined,

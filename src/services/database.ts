@@ -214,6 +214,7 @@ export class DatabaseService {
     min_price?: number;
     max_price?: number;
     bedrooms?: number;
+    floor_number?: number;
     min_parking_count?: number;
     min_confidence?: number;
     limit?: number;
@@ -243,6 +244,10 @@ export class DatabaseService {
 
     if (filters.bedrooms) {
       query = query.eq("bedrooms", filters.bedrooms);
+    }
+
+    if (filters.floor_number) {
+      query = query.eq("floor_number", filters.floor_number);
     }
 
     if (filters.min_parking_count) {
