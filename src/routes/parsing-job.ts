@@ -335,4 +335,158 @@ router.get("/stats", async (req, res) => {
   }
 });
 
+// Export properties to CSV - requires authentication
+router.get("/properties/export/csv", jwtMiddleware, async (req, res) => {
+  try {
+    const job = initializeParsingJob(req.log);
+
+    const filters = {
+      listing_type: req.query.listing_type as
+        | "sale"
+        | "rental"
+        | "lease"
+        | undefined,
+      property_type: req.query.property_type as string | undefined,
+      location: req.query.location as string | undefined,
+      min_price: req.query.min_price
+        ? parseInt(req.query.min_price as string)
+        : undefined,
+      max_price: req.query.max_price
+        ? parseInt(req.query.max_price as string)
+        : undefined,
+      bedrooms: req.query.bedrooms
+        ? parseInt(req.query.bedrooms as string)
+        : undefined,
+      floor_number: req.query.floor_number
+        ? parseInt(req.query.floor_number as string)
+        : undefined,
+      min_parking_count: req.query.min_parking_count
+        ? parseInt(req.query.min_parking_count as string)
+        : undefined,
+      min_confidence: req.query.min_confidence
+        ? parseFloat(req.query.min_confidence as string)
+        : undefined,
+      // Remove limit for export to get all records
+      limit: undefined,
+    };
+
+    const properties = await job.searchProperties(filters);
+
+    // Generate CSV content
+    const csvContent = convertPropertiesToCSV(properties);
+
+    // Set headers for CSV download
+    const timestamp = new Date().toISOString().split("T")[0];
+    const filename = `property-listings-${timestamp}-${properties.length}-records.csv`;
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Pragma", "no-cache");
+
+    // Add BOM for proper UTF-8 encoding in Excel
+    res.write("\uFEFF");
+    res.write(csvContent);
+    res.end();
+  } catch (error) {
+    console.error("Error exporting properties to CSV:", error);
+    res.status(500).json({
+      status: "error",
+      message: "Failed to export properties to CSV",
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+// Helper function to convert properties to CSV format
+function convertPropertiesToCSV(properties: any[]): string {
+  if (properties.length === 0) {
+    return "";
+  }
+
+  // Define the headers we want to include in the CSV
+  const headers = [
+    "Property Name",
+    "Property Type",
+    "Listing Type",
+    "Price",
+    "Price (Numeric)",
+    "Location",
+    "Area Name",
+    "City",
+    "Bedrooms",
+    "Bathrooms",
+    "Area (sqft)",
+    "Floor Number",
+    "Total Floors",
+    "Amenities",
+    "Furnishing",
+    "Parking",
+    "Parking Count",
+    "Contact Info",
+    "Availability Date",
+    "Description",
+    "Parsing Confidence",
+    "Created At",
+    "Updated At",
+  ];
+
+  // Create CSV content
+  const csvContent = [
+    // Header row
+    headers.join(","),
+    // Data rows
+    ...properties.map((property) => {
+      const row = [
+        property.property_name || "",
+        property.property_type || "",
+        property.listing_type || "",
+        property.price || "",
+        property.price_numeric || "",
+        property.location || "",
+        property.area_name || "",
+        property.city || "",
+        property.bedrooms || "",
+        property.bathrooms || "",
+        property.area_sqft || "",
+        property.floor_number || "",
+        property.total_floors || "",
+        property.amenities?.join("; ") || "",
+        property.furnishing || "",
+        property.parking ? "Yes" : "No",
+        property.parking_count || "",
+        property.contact_info || "",
+        property.availability_date || "",
+        property.description || "",
+        property.parsing_confidence || "",
+        new Date(property.created_at).toLocaleDateString(),
+        new Date(property.updated_at).toLocaleDateString(),
+      ];
+
+      // Escape commas and quotes in CSV values
+      return row
+        .map((value) => {
+          const stringValue = String(value);
+          // Always wrap values that contain commas, quotes, newlines, or start with special characters
+          if (
+            stringValue.includes(",") ||
+            stringValue.includes('"') ||
+            stringValue.includes("\n") ||
+            stringValue.includes("\r") ||
+            stringValue.startsWith("=") ||
+            stringValue.startsWith("+") ||
+            stringValue.startsWith("-") ||
+            stringValue.startsWith("@")
+          ) {
+            return `"${stringValue.replace(/"/g, '""')}"`;
+          }
+          return stringValue;
+        })
+        .join(",");
+    }),
+  ].join("\n");
+
+  return csvContent;
+}
+
 export default router;

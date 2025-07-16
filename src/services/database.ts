@@ -258,9 +258,12 @@ export class DatabaseService {
       query = query.gte("parsing_confidence", filters.min_confidence);
     }
 
-    query = query
-      .order("created_at", { ascending: false })
-      .limit(filters.limit || 50);
+    query = query.order("created_at", { ascending: false });
+
+    // Only apply limit if it's specified
+    if (filters.limit && filters.limit > 0) {
+      query = query.limit(filters.limit);
+    }
 
     const { data, error } = await query;
 
