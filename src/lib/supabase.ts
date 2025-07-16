@@ -61,22 +61,6 @@ export interface WhatsAppMessage {
   created_at?: string;
 }
 
-export interface WhatsAppAuth {
-  user_id: string;
-  creds: any;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export interface WhatsAppKeys {
-  user_id: string;
-  key_type: string;
-  key_id: string;
-  key_data: any;
-  created_at?: string;
-  updated_at?: string;
-}
-
 export interface UserGroupPreference {
   id?: string;
   user_id: string;

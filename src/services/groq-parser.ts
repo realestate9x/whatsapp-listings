@@ -183,6 +183,7 @@ Guidelines:
 - Process each message in order and return results in the same order
 - If a message contains both sale and rental information, create TWO separate property objects with different listing_type and prices
 - If a message is not about real estate, return empty properties array
+- Extract property names from common patterns: "Building name:", "Project:", "Complex:", "Tower:", "Society:", "Residence:", or building names mentioned before addresses
 - Extract contact information (phone numbers, emails) into contact_info
 - Convert area measurements to square feet if possible
 - Identify amenities like gym, pool, parking, security, etc.
@@ -196,6 +197,8 @@ Guidelines:
 - All prices are assumed to be in Indian Rupees (INR)
 - Be conservative with parsing_confidence - only use high values (>0.8) when information is very clear
 - For dual listings (sale + rental), copy all property details but change listing_type and price accordingly
+- Look for property names in these patterns: "Building: XYZ", "Project: ABC", "Tower: DEF", "Society: GHI", "Complex: JKL", "Residence: MNO"
+- Property names might also appear as standalone words before location (e.g., "Oberoi Sky City, Borivali")
 - The results array must contain exactly ${messageTexts.length} objects in the same order as the input messages
 
 Return only the JSON object, no additional text.
@@ -245,6 +248,11 @@ Guidelines:
 - Lease: Property being leased (usually longer term, commercial or residential)
 - Set parsing_confidence based on how clear and complete the information is
 - Extract numeric values from price text (e.g., "₹50,000" -> price_numeric: 50000)
+- For property_name, look for specific property names mentioned in the message:
+  - Names before location (e.g., "Oberoi Sky City, Borivali")
+  - Names with prefixes like "Building:", "Project:", "Complex:", "Tower:", "Society:", "Residence:"
+  - Named developments or buildings (e.g., "Raheja Atlantis", "Lodha Park")
+  - Extract only the property name without location or other details
 - Extract parking information: set parking=true if parking is available, parking_count=number of spaces
 - All prices are assumed to be in Indian Rupees (INR)
 - Be conservative with parsing_confidence - only use high values (>0.8) when information is very clear
