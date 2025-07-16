@@ -68,6 +68,30 @@ router.post("/disconnect", (req, res, next) => {
   })();
 });
 
+// POST /api/whatsapp/force-logout - Force logout and cleanup auth data
+router.post("/force-logout", (req, res, next) => {
+  (async () => {
+    try {
+      const userId = req.user?.sub;
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const serviceManager = req.app.locals
+        .whatsappServiceManager as WhatsAppServiceManager;
+      await serviceManager.handleUserLogout(userId);
+
+      res.json({
+        success: true,
+        message: "WhatsApp logout and cleanup completed successfully",
+        user_id: userId,
+      });
+    } catch (error) {
+      next(error);
+    }
+  })();
+});
+
 // GET /api/whatsapp/groups - Get available WhatsApp groups for the user
 router.get("/groups", (req, res, next) => {
   (async () => {

@@ -18,6 +18,7 @@ export class WhatsAppService {
   private maxReconnectAttempts: number = 5;
   private reconnectDelay: number = 5000; // 5 seconds
   private userId: string;
+  private onLogoutCallback?: () => void;
 
   constructor(userId: string) {
     this.userId = userId;
@@ -73,10 +74,10 @@ export class WhatsAppService {
         const stateData = fs.readFileSync(stateFile, "utf8");
         const state = JSON.parse(stateData);
 
-        // Only restore recent state (within last 10 minutes)
+        // Only restore recent state (within last 2 hours)
         const timeDiff = Date.now() - (state.timestamp || 0);
-        if (timeDiff < 10 * 60 * 1000) {
-          // 10 minutes
+        if (timeDiff < 2 * 60 * 60 * 1000) {
+          // 2 hours
           this.latestQR = state.latestQR;
           // Don't restore isConnected as we need to verify the actual connection
         }
@@ -167,8 +168,18 @@ export class WhatsAppService {
           this.scheduleReconnect();
         } else {
           console.log(
-            `🚪 User ${this.userId} logged out - please restart the application`
+            `🚪 User ${this.userId} logged out - cleaning up auth data`
           );
+          // Clean up auth data and state when user logs out
+          this.handleLogout().catch((error: any) => {
+            console.error(
+              `Error handling logout for user ${this.userId}:`,
+              error
+            );
+          });
+
+          // Notify service manager to remove this service
+          this.notifyLogout();
         }
       }
 
@@ -421,6 +432,59 @@ export class WhatsAppService {
       console.log("✅ WhatsApp service cleanup completed");
     } catch (error) {
       console.error("Error during WhatsApp cleanup:", error);
+    }
+  }
+
+  async handleLogout(): Promise<void> {
+    try {
+      console.log(`🧹 Handling logout for user ${this.userId}`);
+
+      // Clean up socket connection
+      await this.cleanup();
+
+      // Remove auth directory and files
+      const authDir = path.join(
+        process.cwd(),
+        `auth_info_baileys_${this.userId}`
+      );
+      if (fs.existsSync(authDir)) {
+        console.log(`🗑️ Removing auth directory: ${authDir}`);
+        fs.rmSync(authDir, { recursive: true, force: true });
+      }
+
+      // Remove persisted state file
+      const stateDir = path.join(process.cwd(), "whatsapp-state");
+      const stateFile = path.join(
+        stateDir,
+        `whatsapp-state-${this.userId}.json`
+      );
+      if (fs.existsSync(stateFile)) {
+        console.log(`🗑️ Removing state file: ${stateFile}`);
+        fs.unlinkSync(stateFile);
+      }
+
+      // Reset internal state
+      this.isConnected = false;
+      this.latestQR = null;
+      this.reconnectAttempts = 0;
+      this.targetGroups = [];
+
+      console.log(`✅ Logout cleanup completed for user ${this.userId}`);
+    } catch (error) {
+      console.error(
+        `❌ Error during logout cleanup for user ${this.userId}:`,
+        error
+      );
+    }
+  }
+
+  setLogoutCallback(callback: () => void): void {
+    this.onLogoutCallback = callback;
+  }
+
+  private notifyLogout(): void {
+    if (this.onLogoutCallback) {
+      this.onLogoutCallback();
     }
   }
 

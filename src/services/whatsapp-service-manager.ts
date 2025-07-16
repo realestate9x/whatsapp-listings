@@ -3,7 +3,9 @@ import { WhatsAppService } from "./whatsapp-service";
 export class WhatsAppServiceManager {
   private userServices = new Map<string, WhatsAppService>();
   private cleanupTimers = new Map<string, NodeJS.Timeout>();
-  private readonly CLEANUP_DELAY = 30 * 60 * 1000; // 30 minutes of inactivity
+  private userLastActivity = new Map<string, number>();
+  private readonly CLEANUP_DELAY = 2 * 60 * 60 * 1000; // 2 hours of inactivity (increased from 30 min)
+  private readonly ACTIVITY_THRESHOLD = 30 * 60 * 1000; // 30 minutes
 
   constructor() {
     // Cleanup inactive services periodically
@@ -20,7 +22,38 @@ export class WhatsAppServiceManager {
       console.log(`📱 Creating new WhatsApp service for user: ${userId}`);
       service = new WhatsAppService(userId);
       this.userServices.set(userId, service);
+
+      // Set logout callback to automatically remove service when user logs out
+      service.setLogoutCallback(() => {
+        console.log(`🚪 Auto-removing service for logged out user: ${userId}`);
+        this.removeUserService(userId).catch((error) => {
+          console.error(
+            `Error removing service for logged out user ${userId}:`,
+            error
+          );
+        });
+      });
+
+      // Auto-start if possible when creating a new service
+      service
+        .autoStartIfPossible()
+        .then((started) => {
+          if (started) {
+            console.log(
+              `🔄 Auto-started WhatsApp connection for user: ${userId}`
+            );
+          }
+        })
+        .catch((error) => {
+          console.error(
+            `❌ Failed to auto-start WhatsApp for user ${userId}:`,
+            error
+          );
+        });
     }
+
+    // Track user activity
+    this.userLastActivity.set(userId, Date.now());
 
     // Reset cleanup timer for this user
     this.resetCleanupTimer(userId);
@@ -39,6 +72,10 @@ export class WhatsAppServiceManager {
    * Get service if it exists (don't create new one)
    */
   getExistingService(userId: string): WhatsAppService | undefined {
+    // Track user activity even when just checking existing service
+    if (this.userServices.has(userId)) {
+      this.userLastActivity.set(userId, Date.now());
+    }
     return this.userServices.get(userId);
   }
 
@@ -51,6 +88,7 @@ export class WhatsAppServiceManager {
       console.log(`🧹 Removing WhatsApp service for user: ${userId}`);
       await service.cleanup();
       this.userServices.delete(userId);
+      this.userLastActivity.delete(userId);
 
       // Clear cleanup timer
       const timer = this.cleanupTimers.get(userId);
@@ -96,13 +134,24 @@ export class WhatsAppServiceManager {
    */
   private async cleanupInactiveServices(): Promise<void> {
     const services = Array.from(this.userServices.entries());
+    const now = Date.now();
 
     for (const [userId, service] of services) {
+      const lastActivity = this.userLastActivity.get(userId) || 0;
+      const inactiveTime = now - lastActivity;
       const status = service.getConnectionStatus();
 
-      // Remove services that are not connected and have no recent activity
-      if (!status.isConnected && !status.qrCode) {
-        console.log(`🧹 Cleaning up inactive service for user: ${userId}`);
+      // Only cleanup if user has been inactive for a long time AND is not connected
+      if (
+        inactiveTime > this.ACTIVITY_THRESHOLD &&
+        !status.isConnected &&
+        !status.qrCode
+      ) {
+        console.log(
+          `🧹 Cleaning up inactive service for user: ${userId} (inactive for ${Math.round(
+            inactiveTime / 1000 / 60
+          )} minutes)`
+        );
         await this.removeUserService(userId);
       }
     }
@@ -121,6 +170,7 @@ export class WhatsAppServiceManager {
       clearTimeout(timer);
     }
     this.cleanupTimers.clear();
+    this.userLastActivity.clear();
 
     // Cleanup all services
     const cleanupPromises = Array.from(this.userServices.values()).map(
@@ -147,5 +197,18 @@ export class WhatsAppServiceManager {
     }
 
     return status;
+  }
+
+  /**
+   * Handle user logout - clean up auth data and remove service
+   */
+  async handleUserLogout(userId: string): Promise<void> {
+    const service = this.userServices.get(userId);
+    if (service) {
+      console.log(`🚪 Handling logout for user: ${userId}`);
+      await service.handleLogout();
+      await this.removeUserService(userId);
+      console.log(`✅ Logout handled for user: ${userId}`);
+    }
   }
 }

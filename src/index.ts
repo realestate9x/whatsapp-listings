@@ -74,10 +74,44 @@ const whatsappServiceManager = new WhatsAppServiceManager();
 // Make the service manager available to routes via app.locals
 app.locals.whatsappServiceManager = whatsappServiceManager;
 
-// API Routes
-app.use("/api/messages", messagesRouter);
-app.use("/api/whatsapp", whatsappRouter);
-app.use("/api/parsing-job", parsingJobRouter);
+// Define direct endpoints before API routes
+// User-specific WhatsApp status - requires authentication
+app.get("/my-whatsapp-status", jwtMiddleware, async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) {
+      res.status(401).json({
+        status: "error",
+        message: "User not authenticated",
+      });
+      return;
+    }
+
+    let userService = whatsappServiceManager.getExistingService(userId);
+
+    // If no service exists, create one and try to auto-start
+    if (!userService) {
+      userService = whatsappServiceManager.getServiceForUser(userId);
+      // Give it a moment to attempt auto-start
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    const status = userService.getConnectionStatus();
+    res.json({
+      connected: status.isConnected,
+      qr_pending: !!status.qrCode,
+      socket_active: status.socketActive,
+      user_id: userId,
+      ...status,
+    });
+  } catch (error) {
+    console.error("Error getting user WhatsApp status:", error);
+    res.status(500).json({
+      status: "error",
+      message: "Failed to get user WhatsApp status",
+    });
+  }
+});
 
 // Show QR code status - requires authentication
 app.get("/start-whatsapp", jwtMiddleware, async (req, res) => {
@@ -138,49 +172,10 @@ app.get("/status", (req, res) => {
   }
 });
 
-// User-specific WhatsApp status - requires authentication
-app.get("/my-whatsapp-status", jwtMiddleware, (req, res) => {
-  try {
-    const userId = req.user?.sub;
-    if (!userId) {
-      res.status(401).json({
-        status: "error",
-        message: "User not authenticated",
-      });
-      return;
-    }
-
-    const userService = whatsappServiceManager.getExistingService(userId);
-    if (!userService) {
-      res.json({
-        connected: false,
-        qr_pending: false,
-        socket_active: false,
-        isConnected: false,
-        qrCode: null,
-        status: "disconnected",
-        message: "No WhatsApp service initialized for this user",
-        user_id: userId,
-      });
-      return;
-    }
-
-    const status = userService.getConnectionStatus();
-    res.json({
-      connected: status.isConnected,
-      qr_pending: !!status.qrCode,
-      socket_active: status.socketActive,
-      user_id: userId,
-      ...status,
-    });
-  } catch (error) {
-    console.error("Error getting user WhatsApp status:", error);
-    res.status(500).json({
-      status: "error",
-      message: "Failed to get user WhatsApp status",
-    });
-  }
-});
+// API Routes
+app.use("/api/messages", messagesRouter);
+app.use("/api/whatsapp", whatsappRouter);
+app.use("/api/parsing-job", parsingJobRouter);
 
 // Admin endpoint to view all WhatsApp services status (for debugging)
 app.get("/admin/whatsapp-services", (req, res) => {
