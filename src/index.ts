@@ -5,6 +5,7 @@ import pinoHttp from "pino-http";
 import dotenv from "dotenv";
 import messagesRouter from "./routes/messages";
 import whatsappRouter from "./routes/whatsapp";
+import parsingJobRouter from "./routes/parsing-job";
 import { errorHandler } from "./middlewares/error-handler";
 import { WhatsAppServiceManager } from "./services/whatsapp-service-manager";
 import { jwtMiddleware } from "./middlewares/jwt";
@@ -76,6 +77,7 @@ app.locals.whatsappServiceManager = whatsappServiceManager;
 // API Routes
 app.use("/api/messages", messagesRouter);
 app.use("/api/whatsapp", whatsappRouter);
+app.use("/api/parsing-job", parsingJobRouter);
 
 // Show QR code status - requires authentication
 app.get("/start-whatsapp", jwtMiddleware, async (req, res) => {
