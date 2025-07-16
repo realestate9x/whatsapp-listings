@@ -6,6 +6,7 @@ import {
   DisconnectReason,
 } from "@whiskeysockets/baileys";
 import { supabaseAdmin, WhatsAppMessage } from "../lib/supabase";
+import { PropertyMessageFilter } from "../utils/property-filter";
 import path from "path";
 import fs from "fs";
 
@@ -335,6 +336,27 @@ export class WhatsAppService {
       // Extract plain text from message for efficient searching
       const messageText = this.extractMessageText(msg.message);
 
+      // Filter message to check if it's a property listing
+      const filterResult = PropertyMessageFilter.filterMessage(messageText);
+
+      console.log(
+        `🔍 Property Filter Result: ${
+          filterResult.isPropertyListing ? "PROPERTY" : "NOT PROPERTY"
+        } (${Math.round(filterResult.confidence * 100)}%)`
+      );
+
+      // Only store property listings in the database
+      if (!filterResult.isPropertyListing) {
+        console.log(`❌ Skipping non-property message: ${filterResult.reason}`);
+        return;
+      }
+
+      console.log(
+        `✅ Storing property message - Keywords: ${filterResult.matchedKeywords
+          .slice(0, 3)
+          .join(", ")}, Patterns: ${filterResult.matchedPatterns.join(", ")}`
+      );
+
       const messageData: WhatsAppMessage = {
         user_id: this.userId, // Store messages for this specific user
         timestamp: new Date(
@@ -349,14 +371,16 @@ export class WhatsAppService {
 
       // Store in Supabase for ALL users to access
       try {
-        console.log("🔍 Attempting to store message:", {
+        console.log("� Storing property message:", {
           user_id: messageData.user_id,
           group_name: messageData.group_name,
           sender: messageData.sender,
           message_text:
             messageText.substring(0, 50) +
             (messageText.length > 50 ? "..." : ""),
-          messageKeys: Object.keys(messageData),
+          filterConfidence: filterResult.confidence,
+          matchedKeywords: filterResult.matchedKeywords.length,
+          matchedPatterns: filterResult.matchedPatterns.length,
         });
 
         const { data, error } = await supabaseAdmin
@@ -385,7 +409,13 @@ export class WhatsAppService {
 
       // Always log to console
       console.log(
-        `[${messageType}] [${messageData.timestamp}] [${messageData.group_name}] [${messageData.sender}]: ${messageText}`
+        `[${messageType}] 🏠 [${messageData.timestamp}] [${messageData.group_name}] [${messageData.sender}]: ${messageText}`
+      );
+
+      console.log(
+        `   � Stored property message with ${Math.round(
+          filterResult.confidence * 100
+        )}% confidence`
       );
     } catch (error) {
       console.error(
