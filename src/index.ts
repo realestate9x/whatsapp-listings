@@ -9,6 +9,7 @@ import parsingJobRouter from "./routes/parsing-job";
 import { errorHandler } from "./middlewares/error-handler";
 import { WhatsAppServiceManager } from "./services/whatsapp-service-manager";
 import { jwtMiddleware } from "./middlewares/jwt";
+import { RealEstateParsingJob } from "./services/real-estate-job";
 
 // Load environment variables
 dotenv.config();
@@ -205,6 +206,17 @@ app.listen(PORT, async () => {
   console.log(
     `💡 Users can connect their WhatsApp via /start-whatsapp endpoint`
   );
+
+  // Auto-start the parsing job when server starts
+  try {
+    const parsingJob = new RealEstateParsingJob(logger);
+    await parsingJob.startRecurringJob(1); // 1 minute interval
+    console.log(
+      `✅ Real estate parsing job started automatically (1 min interval)`
+    );
+  } catch (error) {
+    console.error(`❌ Failed to auto-start parsing job:`, error);
+  }
 });
 
 // Graceful shutdown handling
