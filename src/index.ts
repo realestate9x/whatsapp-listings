@@ -221,9 +221,9 @@ app.listen(PORT, async () => {
   // Auto-start the parsing job when server starts
   try {
     const parsingJob = new RealEstateParsingJob(logger);
-    await parsingJob.startRecurringJob(1); // 1 minute interval
+    await parsingJob.startRecurringJob(5); // 5 minute interval
     console.log(
-      `✅ Real estate parsing job started automatically (1 min interval)`
+      `✅ Real estate parsing job started automatically (5 min interval)`
     );
   } catch (error) {
     console.error(`❌ Failed to auto-start parsing job:`, error);
@@ -232,10 +232,12 @@ app.listen(PORT, async () => {
   // Self-ping mechanism to prevent Render.com sleeping (only in production)
   if (process.env.NODE_ENV === "production" && process.env.RENDER_SERVICE_URL) {
     const PING_INTERVAL = 14 * 60 * 1000; // 14 minutes (before 15-min sleep threshold)
-    
+
     setInterval(async () => {
       try {
-        const response = await fetch(`${process.env.RENDER_SERVICE_URL}/health`);
+        const response = await fetch(
+          `${process.env.RENDER_SERVICE_URL}/health`
+        );
         if (response.ok) {
           console.log(`🏥 Self-ping successful at ${new Date().toISOString()}`);
         } else {
@@ -245,7 +247,7 @@ app.listen(PORT, async () => {
         console.error(`❌ Self-ping error:`, error);
       }
     }, PING_INTERVAL);
-    
+
     console.log(`🔄 Self-ping mechanism started (14-minute intervals)`);
   }
 });
