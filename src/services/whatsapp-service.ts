@@ -9,6 +9,7 @@ import { supabaseAdmin, WhatsAppMessage } from "../lib/supabase";
 import { PropertyMessageFilter } from "../utils/property-filter";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 
 export class WhatsAppService {
   private targetGroups: string[] = []; // Will be loaded from database
@@ -357,6 +358,25 @@ export class WhatsAppService {
           .join(", ")}, Patterns: ${filterResult.matchedPatterns.join(", ")}`
       );
 
+      // Create a hash to identify duplicate messages
+      const messageHash = this.createMessageHash(
+        messageText,
+        msg.key.participant || "unknown"
+      );
+
+      // Check if this message already exists for this user
+      const existingMessage = await this.checkForDuplicateMessage(
+        messageHash,
+        this.userId
+      );
+
+      if (existingMessage) {
+        console.log(
+          `🔄 Duplicate message detected - skipping (already exists from group: ${existingMessage.group_name})`
+        );
+        return;
+      }
+
       const messageData: WhatsAppMessage = {
         user_id: this.userId, // Store messages for this specific user
         timestamp: new Date(
@@ -367,6 +387,7 @@ export class WhatsAppService {
         sender: msg.key.participant || "unknown",
         message_text: messageText,
         message_meta: serializedMessage,
+        message_hash: messageHash,
       };
 
       // Store in Supabase for ALL users to access
@@ -750,6 +771,46 @@ export class WhatsAppService {
     } catch (error) {
       console.error("Error updating user group preferences:", error);
       throw error;
+    }
+  }
+
+  // Create a hash for message deduplication
+  private createMessageHash(messageText: string, sender: string): string {
+    // Normalize the message text by removing extra whitespace and converting to lowercase
+    const normalizedText = messageText
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+
+    // Create a hash from just the normalized text and sender
+    // This ensures the same message from the same sender will have the same hash regardless of which group it appears in
+    const hashInput = `${normalizedText}|${sender}`;
+
+    return crypto.createHash("sha256").update(hashInput).digest("hex");
+  }
+
+  // Check if a message with the same hash already exists for this user
+  private async checkForDuplicateMessage(
+    messageHash: string,
+    userId: string
+  ): Promise<any | null> {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("whatsapp_messages")
+        .select("id, group_name")
+        .eq("user_id", userId)
+        .eq("message_hash", messageHash)
+        .limit(1);
+
+      if (error) {
+        console.error("Error checking for duplicate message:", error);
+        return null;
+      }
+
+      return data && data.length > 0 ? data[0] : null;
+    } catch (error) {
+      console.error("Error checking for duplicate message:", error);
+      return null;
     }
   }
 }

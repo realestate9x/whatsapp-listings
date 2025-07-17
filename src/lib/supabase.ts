@@ -58,6 +58,7 @@ export interface WhatsAppMessage {
   sender: string;
   message_text?: string;
   message_meta: any;
+  message_hash?: string;
   created_at?: string;
 }
 

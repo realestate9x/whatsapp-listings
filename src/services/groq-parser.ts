@@ -205,62 +205,6 @@ Return only the JSON object, no additional text.
 `;
   }
 
-  private createParsingPrompt(messageText: string): string {
-    return `
-Parse this WhatsApp real estate message and extract structured data. Return a JSON object with the following structure:
-
-{
-  "property_name": "string or null",
-  "property_type": "apartment|house|villa|commercial|office|shop|warehouse|land|other or null",      "listing_type": "sale|rental|lease",
-      "price": "string or null (original price text)",
-      "price_numeric": "number or null (numeric value in rupees for sorting)",
-      "location": "string or null (full address/location)",
-  "area_name": "string or null (neighborhood/area name)",
-  "city": "string or null",
-  "bedrooms": "number or null",
-  "bathrooms": "number or null",
-  "area_sqft": "number or null",
-  "floor_number": "number or null",
-  "total_floors": "number or null",
-  "amenities": ["array of strings or null"],
-  "furnishing": "furnished|semi-furnished|unfurnished or null",
-  "parking": "boolean or null (true if parking available)",
-  "parking_count": "number or null (number of parking spaces)",
-  "contact_info": "string or null (phone/email/contact details)",
-  "availability_date": "string or null (YYYY-MM-DD format)",
-  "description": "string or null (additional details)",
-  "parsing_confidence": "number between 0 and 1"
-}
-
-Message to parse:
-"""
-${messageText}
-"""
-
-Guidelines:
-- If the message is not about real estate, set listing_type to null and parsing_confidence to 0
-- Extract contact information (phone numbers, emails) into contact_info
-- Convert area measurements to square feet if possible
-- Identify amenities like gym, pool, parking, security, etc.
-- Determine if it's for sale, rental, or lease based on context
-- Sale: Property being sold permanently
-- Rental: Property being rented (monthly/yearly)
-- Lease: Property being leased (usually longer term, commercial or residential)
-- Set parsing_confidence based on how clear and complete the information is
-- Extract numeric values from price text (e.g., "₹50,000" -> price_numeric: 50000)
-- For property_name, look for specific property names mentioned in the message:
-  - Names before location (e.g., "Oberoi Sky City, Borivali")
-  - Names with prefixes like "Building:", "Project:", "Complex:", "Tower:", "Society:", "Residence:"
-  - Named developments or buildings (e.g., "Raheja Atlantis", "Lodha Park")
-  - Extract only the property name without location or other details
-- Extract parking information: set parking=true if parking is available, parking_count=number of spaces
-- All prices are assumed to be in Indian Rupees (INR)
-- Be conservative with parsing_confidence - only use high values (>0.8) when information is very clear
-
-Return only the JSON object, no additional text.
-`;
-  }
-
   private validateAndNormalizeData(data: any): ParsedRealEstateData {
     // Ensure required fields
     if (

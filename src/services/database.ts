@@ -219,7 +219,15 @@ export class DatabaseService {
     min_confidence?: number;
     limit?: number;
   }): Promise<ParsedRealEstateProperty[]> {
-    let query = this.supabase.from("parsed_real_estate_properties").select("*");
+    // Join with messages table to include group information
+    let query = this.supabase.from("parsed_real_estate_properties").select(`
+        *,
+        whatsapp_messages!inner (
+          group_name,
+          group_id,
+          sender
+        )
+      `);
 
     // Apply filters
     if (filters.listing_type) {
