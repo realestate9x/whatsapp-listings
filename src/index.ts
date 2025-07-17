@@ -28,6 +28,17 @@ const logger = pino({
 });
 const app = express();
 
+// Health check endpoint to prevent sleeping
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    env: process.env.NODE_ENV || "development",
+  });
+});
+
 // Enable CORS for frontend
 app.use(
   cors({
@@ -216,6 +227,26 @@ app.listen(PORT, async () => {
     );
   } catch (error) {
     console.error(`❌ Failed to auto-start parsing job:`, error);
+  }
+
+  // Self-ping mechanism to prevent Render.com sleeping (only in production)
+  if (process.env.NODE_ENV === "production" && process.env.RENDER_SERVICE_URL) {
+    const PING_INTERVAL = 14 * 60 * 1000; // 14 minutes (before 15-min sleep threshold)
+    
+    setInterval(async () => {
+      try {
+        const response = await fetch(`${process.env.RENDER_SERVICE_URL}/health`);
+        if (response.ok) {
+          console.log(`🏥 Self-ping successful at ${new Date().toISOString()}`);
+        } else {
+          console.warn(`⚠️ Self-ping failed with status: ${response.status}`);
+        }
+      } catch (error) {
+        console.error(`❌ Self-ping error:`, error);
+      }
+    }, PING_INTERVAL);
+    
+    console.log(`🔄 Self-ping mechanism started (14-minute intervals)`);
   }
 });
 
