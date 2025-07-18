@@ -206,6 +206,13 @@ export async function useSupabaseAuthState(
         .eq("user_id", userId);
 
       if (fetchError) {
+        logger.error(
+          {
+            userId,
+            error: fetchError,
+          },
+          "Failed to fetch existing keys for comparison"
+        );
         throw fetchError;
       }
 
@@ -228,23 +235,35 @@ export async function useSupabaseAuthState(
 
       // Delete removed keys
       if (keysToDelete.length > 0) {
-        const deletePromises = keysToDelete.map((cacheKey) => {
+        const deletePromises = keysToDelete.map(async (cacheKey) => {
           const [keyType, keyId] = cacheKey.split(":", 2);
-          return supabaseAdmin
+          const { error } = await supabaseAdmin
             .from("whatsapp_auth_keys")
             .delete()
             .eq("user_id", userId)
             .eq("key_type", keyType)
             .eq("key_id", keyId);
+
+          if (error) {
+            logger.warn(
+              {
+                userId,
+                keyType,
+                keyId,
+                error,
+              },
+              "Failed to delete key, continuing with others"
+            );
+          }
         });
 
-        await Promise.all(deletePromises);
+        await Promise.allSettled(deletePromises);
         logger.debug(
           {
             userId,
             deletedCount: keysToDelete.length,
           },
-          "Deleted keys"
+          "Processed key deletions"
         );
       }
 
@@ -263,25 +282,53 @@ export async function useSupabaseAuthState(
 
         // Batch upsert in chunks to avoid payload size limits
         const chunkSize = 100;
+        let successfulUpserts = 0;
+
         for (let i = 0; i < upsertData.length; i += chunkSize) {
           const chunk = upsertData.slice(i, i + chunkSize);
-          const { error } = await supabaseAdmin
-            .from("whatsapp_auth_keys")
-            .upsert(chunk, {
-              onConflict: "user_id,key_type,key_id",
-            });
+          try {
+            const { error } = await supabaseAdmin
+              .from("whatsapp_auth_keys")
+              .upsert(chunk, {
+                onConflict: "user_id,key_type,key_id",
+              });
 
-          if (error) {
-            throw error;
+            if (error) {
+              logger.warn(
+                {
+                  userId,
+                  chunkIndex: Math.floor(i / chunkSize),
+                  chunkSize: chunk.length,
+                  error,
+                },
+                "Failed to upsert chunk of keys, continuing with others"
+              );
+            } else {
+              successfulUpserts += chunk.length;
+            }
+          } catch (chunkError) {
+            logger.warn(
+              {
+                userId,
+                chunkIndex: Math.floor(i / chunkSize),
+                chunkSize: chunk.length,
+                error:
+                  chunkError instanceof Error
+                    ? chunkError.message
+                    : String(chunkError),
+              },
+              "Exception during key upsert chunk, continuing with others"
+            );
           }
         }
 
         logger.debug(
           {
             userId,
-            savedCount: keysToUpsert.length,
+            totalKeys: keysToUpsert.length,
+            successfulUpserts,
           },
-          "Saved keys"
+          "Completed key upsert operation"
         );
       }
 
@@ -346,7 +393,19 @@ export async function useSupabaseAuthState(
         if (hasChanges) {
           keysCacheDirty = true;
           // Save immediately to ensure data persistence
-          await saveKeys();
+          try {
+            await saveKeys();
+          } catch (error) {
+            logger.error(
+              {
+                userId,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              "Failed to save keys after set operation, will retry on next save"
+            );
+            // Don't throw the error to prevent breaking the auth flow
+            // The keys will be saved on the next successful operation
+          }
         }
       },
 

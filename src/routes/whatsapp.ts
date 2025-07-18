@@ -177,11 +177,16 @@ router.get("/groups", (req, res, next) => {
 
       const serviceManager = req.app.locals
         .whatsappServiceManager as WhatsAppServiceManager;
-      const userService = serviceManager.getExistingService(userId);
+      const userService = serviceManager.getServiceForUser(userId);
 
-      if (!userService) {
+      // Check if the service is connected
+      const status = userService.getConnectionStatus();
+      if (!status.isConnected) {
         return res.status(400).json({
           error: "WhatsApp not connected. Please connect first.",
+          status: status.status,
+          qr_pending: !!status.qrCode,
+          note: "Use /connect to initialize connection",
         });
       }
 
@@ -205,7 +210,30 @@ router.get("/groups", (req, res, next) => {
         user_id: userId,
       });
     } catch (error) {
-      next(error);
+      // Check if it's a connection error from getAvailableGroups
+      if (
+        error instanceof Error &&
+        error.message === "WhatsApp not connected"
+      ) {
+        return res.status(400).json({
+          error: "WhatsApp connection lost. Please reconnect.",
+          status: "disconnected",
+          note: "Use /connect to re-establish connection",
+        });
+      }
+
+      logger.error(
+        {
+          userId: req.user?.sub,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Error fetching WhatsApp groups"
+      );
+
+      res.status(500).json({
+        error: "Failed to fetch WhatsApp groups",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   })();
 });
@@ -228,11 +256,16 @@ router.put("/groups", (req, res, next) => {
 
       const serviceManager = req.app.locals
         .whatsappServiceManager as WhatsAppServiceManager;
-      const userService = serviceManager.getExistingService(userId);
+      const userService = serviceManager.getServiceForUser(userId);
 
-      if (!userService) {
+      // Check if the service is connected
+      const status = userService.getConnectionStatus();
+      if (!status.isConnected) {
         return res.status(400).json({
           error: "WhatsApp not connected. Please connect first.",
+          status: status.status,
+          qr_pending: !!status.qrCode,
+          note: "Use /connect to initialize connection",
         });
       }
 
@@ -244,7 +277,18 @@ router.put("/groups", (req, res, next) => {
         user_id: userId,
       });
     } catch (error) {
-      next(error);
+      logger.error(
+        {
+          userId: req.user?.sub,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Error updating group preferences"
+      );
+
+      res.status(500).json({
+        error: "Failed to update group preferences",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   })();
 });

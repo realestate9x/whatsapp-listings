@@ -202,6 +202,32 @@ export class WhatsAppService {
           );
           await this.handleLogout();
           this.notifyLogout();
+        } else if (statusCode === 440) {
+          // Handle conflict/replaced error - another device took over the session
+          logger.warn(
+            {
+              userId: this.userId,
+              statusCode,
+              error: disconnectError,
+            },
+            "WhatsApp session replaced by another device/connection"
+          );
+
+          // Clear auth data since the session is no longer valid
+          await this.handleLogout();
+          this.notifyLogout();
+        } else if (statusCode === DisconnectReason.connectionReplaced) {
+          // Handle connection replaced scenario
+          logger.warn(
+            {
+              userId: this.userId,
+              statusCode,
+            },
+            "WhatsApp connection replaced, clearing auth data"
+          );
+
+          await this.handleLogout();
+          this.notifyLogout();
         } else {
           // For other disconnect reasons, attempt to reconnect
           logger.info(
