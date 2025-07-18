@@ -1,31 +1,18 @@
-import express, { Request, Response } from "express";
 import cors from "cors";
-import pino from "pino";
-import pinoHttp from "pino-http";
 import dotenv from "dotenv";
-import messagesRouter from "./routes/messages";
-import whatsappRouter from "./routes/whatsapp";
-import parsingJobRouter from "./routes/parsing-job";
+import express from "express";
+import logger from "./lib/logger";
+import pinoHttp from "pino-http";
 import { errorHandler } from "./middlewares/error-handler";
-import { WhatsAppServiceManager } from "./services/whatsapp-service-manager";
-import { jwtMiddleware } from "./middlewares/jwt";
+import messagesRouter from "./routes/messages";
+import parsingJobRouter from "./routes/parsing-job";
+import whatsappRouter from "./routes/whatsapp";
 import { RealEstateParsingJob } from "./services/real-estate-job";
+import { WhatsAppServiceManager } from "./services/whatsapp-service-manager";
 
 // Load environment variables
 dotenv.config();
 
-const logger = pino({
-  level: "info",
-  transport: {
-    target: "pino-pretty",
-    options: {
-      colorize: true,
-      singleLine: true,
-      messageFormat: "{req.method} {req.url} {res.statusCode} {responseTime}ms",
-      ignore: "pid,hostname,req,res,responseTime",
-    },
-  },
-});
 const app = express();
 
 // Health check endpoint to prevent sleeping
@@ -86,104 +73,6 @@ const whatsappServiceManager = new WhatsAppServiceManager();
 // Make the service manager available to routes via app.locals
 app.locals.whatsappServiceManager = whatsappServiceManager;
 
-// Define direct endpoints before API routes
-// User-specific WhatsApp status - requires authentication
-app.get("/my-whatsapp-status", jwtMiddleware, async (req, res) => {
-  try {
-    const userId = req.user?.sub;
-    if (!userId) {
-      res.status(401).json({
-        status: "error",
-        message: "User not authenticated",
-      });
-      return;
-    }
-
-    let userService = whatsappServiceManager.getExistingService(userId);
-
-    // If no service exists, create one and try to auto-start
-    if (!userService) {
-      userService = whatsappServiceManager.getServiceForUser(userId);
-      // Give it a moment to attempt auto-start
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-
-    const status = userService.getConnectionStatus();
-    res.json({
-      connected: status.isConnected,
-      qr_pending: !!status.qrCode,
-      socket_active: status.socketActive,
-      user_id: userId,
-      ...status,
-    });
-  } catch (error) {
-    console.error("Error getting user WhatsApp status:", error);
-    res.status(500).json({
-      status: "error",
-      message: "Failed to get user WhatsApp status",
-    });
-  }
-});
-
-// Show QR code status - requires authentication
-app.get("/start-whatsapp", jwtMiddleware, async (req, res) => {
-  try {
-    const userId = req.user?.sub;
-    if (!userId) {
-      res.status(401).json({
-        status: "error",
-        message: "User not authenticated",
-        isConnected: false,
-        qrCode: null,
-      });
-      return;
-    }
-
-    const userService = whatsappServiceManager.getServiceForUser(userId);
-    const result = await userService.initializeIfNeeded();
-    res.json(result);
-  } catch (error) {
-    console.error("Error starting WhatsApp:", error);
-    res.status(500).json({
-      status: "error",
-      message: "Failed to start WhatsApp connection",
-      isConnected: false,
-      qrCode: null,
-    });
-  }
-});
-
-// Check WhatsApp connection status - public endpoint with limited info
-app.get("/status", (req, res) => {
-  try {
-    const allStatuses = whatsappServiceManager.getAllServicesStatus();
-    const activeServices = Object.values(allStatuses).filter(
-      (status: any) => status.isConnected
-    ).length;
-    const totalServices = Object.keys(allStatuses).length;
-
-    res.json({
-      connected: activeServices > 0,
-      qr_pending: Object.values(allStatuses).some(
-        (status: any) => status.qrCode
-      ),
-      socket_active: activeServices > 0,
-      isConnected: activeServices > 0,
-      qrCode: null, // Don't expose QR codes in public endpoint
-      status: activeServices > 0 ? "connected" : "disconnected",
-      message: `Multi-user WhatsApp service: ${activeServices}/${totalServices} connections active`,
-      active_connections: activeServices,
-      total_services: totalServices,
-    });
-  } catch (error) {
-    console.error("Error getting WhatsApp status:", error);
-    res.status(500).json({
-      status: "error",
-      message: "Failed to get WhatsApp status",
-    });
-  }
-});
-
 // API Routes
 app.use("/api/messages", messagesRouter);
 app.use("/api/whatsapp", whatsappRouter);
@@ -201,7 +90,12 @@ app.get("/admin/whatsapp-services", (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("Error getting all services status:", error);
+    logger.error(
+      {
+        error: error instanceof Error ? error.message : String(error),
+      },
+      "Error getting all services status"
+    );
     res.status(500).json({
       error: "Failed to get services status",
     });
@@ -212,21 +106,36 @@ app.get("/admin/whatsapp-services", (req, res) => {
 app.use(errorHandler);
 
 app.listen(PORT, async () => {
-  console.log(`Express server running on http://localhost:${PORT}`);
-  console.log(`🚀 Multi-user WhatsApp service manager initialized`);
-  console.log(
-    `💡 Users can connect their WhatsApp via /start-whatsapp endpoint`
+  logger.info(
+    {
+      port: PORT,
+      nodeEnv: process.env.NODE_ENV || "development",
+    },
+    "Express server started"
+  );
+
+  logger.info("Multi-user WhatsApp service manager initialized");
+  logger.info(
+    "Users can connect their WhatsApp via POST /api/whatsapp/connect"
   );
 
   // Auto-start the parsing job when server starts
   try {
     const parsingJob = new RealEstateParsingJob(logger);
     await parsingJob.startRecurringJob(5); // 5 minute interval
-    console.log(
-      `✅ Real estate parsing job started automatically (5 min interval)`
+    logger.info(
+      {
+        intervalMinutes: 5,
+      },
+      "Real estate parsing job started automatically"
     );
   } catch (error) {
-    console.error(`❌ Failed to auto-start parsing job:`, error);
+    logger.error(
+      {
+        error: error instanceof Error ? error.message : String(error),
+      },
+      "Failed to auto-start parsing job"
+    );
   }
 
   // Self-ping mechanism to prevent Render.com sleeping (only in production)
@@ -239,28 +148,48 @@ app.listen(PORT, async () => {
           `${process.env.RENDER_SERVICE_URL}/health`
         );
         if (response.ok) {
-          console.log(`🏥 Self-ping successful at ${new Date().toISOString()}`);
+          logger.debug(
+            {
+              timestamp: new Date().toISOString(),
+            },
+            "Self-ping successful"
+          );
         } else {
-          console.warn(`⚠️ Self-ping failed with status: ${response.status}`);
+          logger.warn(
+            {
+              status: response.status,
+            },
+            "Self-ping failed"
+          );
         }
       } catch (error) {
-        console.error(`❌ Self-ping error:`, error);
+        logger.error(
+          {
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "Self-ping error"
+        );
       }
     }, PING_INTERVAL);
 
-    console.log(`🔄 Self-ping mechanism started (14-minute intervals)`);
+    logger.info(
+      {
+        intervalMinutes: 14,
+      },
+      "Self-ping mechanism started"
+    );
   }
 });
 
 // Graceful shutdown handling
 process.on("SIGINT", async () => {
-  console.log("\n🛑 Received SIGINT, shutting down gracefully...");
+  logger.info("Received SIGINT, shutting down gracefully");
   await whatsappServiceManager.cleanupAll();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
-  console.log("\n🛑 Received SIGTERM, shutting down gracefully...");
+  logger.info("Received SIGTERM, shutting down gracefully");
   await whatsappServiceManager.cleanupAll();
   process.exit(0);
 });

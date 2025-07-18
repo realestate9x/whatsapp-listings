@@ -71,3 +71,21 @@ export interface UserGroupPreference {
   created_at?: string;
   updated_at?: string;
 }
+
+export interface WhatsAppAuthCreds {
+  id?: string;
+  user_id: string;
+  creds_data: any;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface WhatsAppAuthKeys {
+  id?: string;
+  user_id: string;
+  key_type: string;
+  key_id: string;
+  key_data: any;
+  created_at?: string;
+  updated_at?: string;
+}

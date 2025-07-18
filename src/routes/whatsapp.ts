@@ -1,10 +1,42 @@
 import express from "express";
 import { jwtMiddleware } from "../middlewares/jwt";
 import { WhatsAppServiceManager } from "../services/whatsapp-service-manager";
+import logger from "../lib/logger";
 
 const router = express.Router();
 
-// Apply JWT middleware to all routes
+// Public endpoint for general WhatsApp service status (no auth required)
+router.get("/public-status", (req, res, next) => {
+  (async () => {
+    try {
+      const serviceManager = req.app.locals
+        .whatsappServiceManager as WhatsAppServiceManager;
+      const allStatuses = serviceManager.getAllServicesStatus();
+      const activeServices = Object.values(allStatuses).filter(
+        (status: any) => status.isConnected
+      ).length;
+      const totalServices = Object.keys(allStatuses).length;
+
+      res.json({
+        connected: activeServices > 0,
+        qr_pending: Object.values(allStatuses).some(
+          (status: any) => status.qrCode
+        ),
+        socket_active: activeServices > 0,
+        isConnected: activeServices > 0,
+        qrCode: null, // Don't expose QR codes in public endpoint
+        status: activeServices > 0 ? "connected" : "disconnected",
+        message: `Multi-user WhatsApp service: ${activeServices}/${totalServices} connections active`,
+        active_connections: activeServices,
+        total_services: totalServices,
+      });
+    } catch (error) {
+      next(error);
+    }
+  })();
+});
+
+// Apply JWT middleware to all routes below this point
 router.use(jwtMiddleware);
 
 // GET /api/whatsapp/status - Get WhatsApp connection status for this user
@@ -18,28 +50,70 @@ router.get("/status", (req, res, next) => {
 
       const serviceManager = req.app.locals
         .whatsappServiceManager as WhatsAppServiceManager;
-      const userService = serviceManager.getExistingService(userId);
+      let userService = serviceManager.getExistingService(userId);
 
+      // If no service exists, create one and try to auto-start
       if (!userService) {
-        return res.json({
-          success: false,
-          connected: false,
-          message: "No WhatsApp connection for this user",
-          user_id: userId,
-          note: "Use /start-whatsapp endpoint to initialize connection",
-        });
+        userService = serviceManager.getServiceForUser(userId);
+        // Give it a moment to attempt auto-start
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
 
       const status = userService.getConnectionStatus();
       res.json({
         success: true,
         connected: status.isConnected,
+        qr_pending: !!status.qrCode,
+        socket_active: status.socketActive,
         ...status,
         user_id: userId,
-        note: "Use /api/messages endpoints to retrieve your messages",
+        note: "Use /connect to initialize connection if not connected",
       });
     } catch (error) {
       next(error);
+    }
+  })();
+});
+
+// POST /api/whatsapp/connect - Connect/initialize WhatsApp for this user
+router.post("/connect", (req, res, next) => {
+  (async () => {
+    try {
+      const userId = req.user?.sub;
+      if (!userId) {
+        return res.status(401).json({
+          error: "User not authenticated",
+          status: "error",
+          isConnected: false,
+          qrCode: null,
+        });
+      }
+
+      const serviceManager = req.app.locals
+        .whatsappServiceManager as WhatsAppServiceManager;
+      const userService = serviceManager.getServiceForUser(userId);
+      const result = await userService.initializeIfNeeded();
+
+      res.json({
+        success: true,
+        user_id: userId,
+        ...result,
+      });
+    } catch (error) {
+      logger.error(
+        {
+          userId: req.user?.sub,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Error connecting WhatsApp"
+      );
+      res.status(500).json({
+        success: false,
+        status: "error",
+        message: "Failed to start WhatsApp connection",
+        isConnected: false,
+        qrCode: null,
+      });
     }
   })();
 });

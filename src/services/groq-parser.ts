@@ -65,7 +65,7 @@ export class GroqRealEstateParser {
             content: prompt,
           },
         ],
-        model: "llama3-8b-8192",
+        model: "llama-3.1-8b-instant",
         temperature: 0.1,
         max_tokens: 4000, // Increased for batch processing
         response_format: { type: "json_object" },

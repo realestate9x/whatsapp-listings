@@ -1,13 +1,17 @@
 import {
   WASocket,
-  useMultiFileAuthState,
   fetchLatestBaileysVersion,
   makeWASocket,
   DisconnectReason,
+  makeCacheableSignalKeyStore,
+  AuthenticationState,
 } from "@whiskeysockets/baileys";
+import { Boom } from "@hapi/boom";
+import NodeCache from "@cacheable/node-cache";
 import { supabaseAdmin, WhatsAppMessage } from "../lib/supabase";
 import { PropertyMessageFilter } from "../utils/property-filter";
-import path from "path";
+import { useSupabaseAuthState } from "../utils/supabase-auth-state";
+import logger from "../lib/logger";
 import fs from "fs";
 import crypto from "crypto";
 
@@ -15,235 +19,330 @@ export class WhatsAppService {
   private targetGroups: string[] = []; // Will be loaded from database
   private sock: WASocket | undefined;
   private latestQR: string | null = null;
-  private isConnected: boolean = false;
-  private reconnectAttempts: number = 0;
-  private maxReconnectAttempts: number = 5;
-  private reconnectDelay: number = 5000; // 5 seconds
+  private connectionState: "close" | "connecting" | "open" = "close";
+  private isAuthenticated: boolean = false;
   private userId: string;
   private onLogoutCallback?: () => void;
+  private msgRetryCounterCache: NodeCache;
+  private authState: AuthenticationState | undefined;
+  private isInitializing: boolean = false;
 
   constructor(userId: string) {
     this.userId = userId;
-    // Load persisted state and user preferences on startup
-    this.loadPersistedState();
+    this.msgRetryCounterCache = new NodeCache();
+
     // Load user preferences async (don't await in constructor)
     this.loadUserGroupPreferences().catch((error) => {
-      console.error(
-        "Failed to load user group preferences in constructor:",
-        error
+      logger.error(
+        {
+          userId: this.userId,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        },
+        "Failed to load user group preferences in constructor"
       );
     });
   }
 
-  private saveStateToFile() {
-    const state = {
-      isConnected: this.isConnected,
-      latestQR: this.latestQR,
-      timestamp: Date.now(),
-      userId: this.userId,
-    };
-
-    try {
-      const stateDir = path.join(process.cwd(), "whatsapp-state");
-
-      // Ensure directory exists
-      if (!fs.existsSync(stateDir)) {
-        fs.mkdirSync(stateDir, { recursive: true });
-      }
-
-      const stateFile = path.join(
-        stateDir,
-        `whatsapp-state-${this.userId}.json`
-      );
-      fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
-    } catch (error) {
-      console.warn(
-        `Failed to save WhatsApp state for user ${this.userId}:`,
-        error
-      );
-    }
-  }
-
-  private loadPersistedState() {
-    try {
-      const stateDir = path.join(process.cwd(), "whatsapp-state");
-      const stateFile = path.join(
-        stateDir,
-        `whatsapp-state-${this.userId}.json`
-      );
-
-      if (fs.existsSync(stateFile)) {
-        const stateData = fs.readFileSync(stateFile, "utf8");
-        const state = JSON.parse(stateData);
-
-        // Only restore recent state (within last 2 hours)
-        const timeDiff = Date.now() - (state.timestamp || 0);
-        if (timeDiff < 2 * 60 * 60 * 1000) {
-          // 2 hours
-          this.latestQR = state.latestQR;
-          // Don't restore isConnected as we need to verify the actual connection
-        }
-      }
-    } catch (error) {
-      console.warn(
-        `Failed to load persisted WhatsApp state for user ${this.userId}:`,
-        error
-      );
-    }
-  }
-
-  private async scheduleReconnect() {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error(
-        `❌ Max reconnection attempts (${this.maxReconnectAttempts}) reached. Manual restart required.`
-      );
+  // Improved connection management following Baileys best practices
+  async startConnection(): Promise<void> {
+    if (this.isInitializing) {
+      logger.info({ userId: this.userId }, "Already initializing connection");
       return;
     }
 
-    this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1); // Exponential backoff
+    this.isInitializing = true;
 
-    console.log(
-      `🔄 Scheduling reconnection attempt ${this.reconnectAttempts}/${
-        this.maxReconnectAttempts
-      } in ${delay / 1000}s`
-    );
+    try {
+      const { state, saveCreds } = await useSupabaseAuthState(this.userId);
 
-    setTimeout(async () => {
-      try {
-        await this.startConnection();
-      } catch (error) {
-        console.error("Reconnection failed:", error);
-        this.scheduleReconnect();
-      }
-    }, delay);
-  }
+      this.authState = state;
+      const { version, isLatest } = await fetchLatestBaileysVersion();
 
-  // Connection management methods
-  async startConnection(): Promise<void> {
-    const { state, saveCreds } = await useMultiFileAuthState(
-      `auth_info_baileys_${this.userId}`
-    );
-    const { version } = await fetchLatestBaileysVersion();
+      logger.info(
+        {
+          userId: this.userId,
+          waVersion: version.join("."),
+          isLatest,
+        },
+        "Starting WhatsApp connection"
+      );
 
-    this.sock = makeWASocket({
-      version,
-      auth: state,
-      syncFullHistory: true,
-      browser: ["Ubuntu", "Chrome", "22.04.4"],
-    });
+      this.sock = makeWASocket({
+        version,
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys),
+        },
+        msgRetryCounterCache: this.msgRetryCounterCache,
+        generateHighQualityLinkPreview: true,
+        browser: ["Ubuntu", "Chrome", "22.04.4"],
+        syncFullHistory: false, // More efficient for property listening
+      });
 
-    this.sock.ev.on("creds.update", saveCreds);
+      // Use the recommended event processing pattern from Baileys
+      this.sock.ev.process(async (events) => {
+        // Handle connection updates
+        if (events["connection.update"]) {
+          await this.handleConnectionUpdate(events["connection.update"]);
+        }
 
-    this.sock.ev.on("messages.upsert", async ({ messages, type }) => {
-      console.log(`📨 Message upsert type: ${type}, count: ${messages.length}`);
-
-      if (type === "notify" || type === "append") {
-        for (const msg of messages) {
-          if (this.sock) {
-            await this.handleMessage(msg, type, this.sock);
+        // Handle credential updates
+        if (events["creds.update"]) {
+          try {
+            await saveCreds();
+          } catch (error) {
+            logger.error(
+              {
+                userId: this.userId,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              "Failed to save credentials"
+            );
+            // Don't throw here as it would break the event processing
+            // The connection can continue to work even if saving fails temporarily
           }
         }
-      }
-    });
 
-    this.sock.ev.on("connection.update", (update) => {
-      const { connection, lastDisconnect, qr } = update;
+        // Handle message upserts
+        if (events["messages.upsert"]) {
+          await this.handleMessageUpsert(events["messages.upsert"]);
+        }
 
-      if (qr) {
-        console.log(
-          `\n🔗 QR Code generated for user ${this.userId}! Access it via /status endpoint`
-        );
-        this.latestQR = qr;
-      }
-
-      if (connection === "close") {
-        this.isConnected = false;
-        console.log(`❌ WhatsApp connection closed for user ${this.userId}`);
-        const disconnectError = lastDisconnect?.error as any;
-        console.error("🛑 Connection closed due to:", disconnectError);
-
-        const shouldReconnect =
-          disconnectError?.output?.statusCode !== DisconnectReason.loggedOut;
-        if (shouldReconnect) {
-          console.log(`🔄 Attempting to reconnect user ${this.userId}...`);
-          this.scheduleReconnect();
-        } else {
-          console.log(
-            `🚪 User ${this.userId} logged out - cleaning up auth data`
+        // Handle message updates (delivery, read receipts, etc.)
+        if (events["messages.update"]) {
+          // Optional: Handle message status updates
+          logger.debug(
+            {
+              userId: this.userId,
+              messageCount: events["messages.update"].length,
+            },
+            "Messages updated"
           );
-          // Clean up auth data and state when user logs out
-          this.handleLogout().catch((error: any) => {
-            console.error(
-              `Error handling logout for user ${this.userId}:`,
-              error
-            );
-          });
+        }
 
-          // Notify service manager to remove this service
+        // Handle group updates
+        if (events["groups.update"]) {
+          logger.debug(
+            {
+              userId: this.userId,
+              groupCount: events["groups.update"].length,
+            },
+            "Groups updated"
+          );
+        }
+      });
+    } catch (error) {
+      logger.error(
+        {
+          userId: this.userId,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        },
+        "Failed to start WhatsApp connection"
+      );
+      throw error;
+    } finally {
+      this.isInitializing = false;
+    }
+  }
+
+  private async handleConnectionUpdate(update: any) {
+    const { connection, lastDisconnect, qr } = update;
+
+    logger.info(
+      {
+        userId: this.userId,
+        connection,
+        hasQr: !!qr,
+      },
+      "WhatsApp connection update"
+    );
+
+    if (qr) {
+      logger.info(
+        {
+          userId: this.userId,
+        },
+        "QR Code generated, access via /status endpoint"
+      );
+      this.latestQR = qr;
+      this.connectionState = "connecting";
+    }
+
+    if (connection === "close") {
+      this.connectionState = "close";
+      this.isAuthenticated = false;
+      logger.warn(
+        {
+          userId: this.userId,
+        },
+        "WhatsApp connection closed"
+      );
+
+      const disconnectError = lastDisconnect?.error;
+      if (disconnectError) {
+        logger.error(
+          {
+            userId: this.userId,
+            error: disconnectError,
+          },
+          "Connection closed due to error"
+        );
+
+        // Check if it's a logout or other permanent disconnect
+        const statusCode = (disconnectError as Boom)?.output?.statusCode;
+
+        if (statusCode === DisconnectReason.loggedOut) {
+          logger.info(
+            {
+              userId: this.userId,
+            },
+            "User logged out, cleaning up auth data"
+          );
+          await this.handleLogout();
           this.notifyLogout();
+        } else {
+          // For other disconnect reasons, attempt to reconnect
+          logger.info(
+            {
+              userId: this.userId,
+              statusCode,
+            },
+            "Attempting to reconnect"
+          );
+          setTimeout(() => {
+            this.startConnection().catch((error) => {
+              logger.error(
+                {
+                  userId: this.userId,
+                  error: error instanceof Error ? error.message : String(error),
+                },
+                "Failed to reconnect"
+              );
+            });
+          }, 3000); // Simple 3-second delay instead of complex exponential backoff
         }
       }
+    }
 
-      if (connection === "open") {
-        this.isConnected = true;
-        this.latestQR = null;
-        this.reconnectAttempts = 0; // Reset reconnect attempts on success
-        console.log(
-          `✅ WhatsApp connected successfully for user ${this.userId}!`
-        );
-        console.log(
-          `👂 Now listening for messages from target groups for user ${this.userId}...`
-        );
+    if (connection === "connecting") {
+      this.connectionState = "connecting";
+      logger.info(
+        {
+          userId: this.userId,
+        },
+        "Connecting to WhatsApp"
+      );
+    }
 
-        // Reload user preferences when connection is established
-        this.loadUserGroupPreferences().catch((error) => {
-          console.error("Failed to load user group preferences:", error);
-        });
+    if (connection === "open") {
+      this.connectionState = "open";
+      this.isAuthenticated = true;
+      this.latestQR = null;
+      logger.info(
+        {
+          userId: this.userId,
+        },
+        "WhatsApp connected successfully, listening for messages"
+      );
+
+      // Reload user preferences when connection is established
+      this.loadUserGroupPreferences().catch((error) => {
+        logger.error(
+          {
+            userId: this.userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "Failed to load user group preferences"
+        );
+      });
+    }
+  }
+
+  private async handleMessageUpsert(upsert: any) {
+    const { messages, type } = upsert;
+
+    logger.debug(
+      {
+        userId: this.userId,
+        messageType: type,
+        messageCount: messages.length,
+      },
+      "Message upsert received"
+    );
+
+    if (type === "notify" || type === "append") {
+      for (const msg of messages) {
+        if (this.sock) {
+          await this.handleMessage(msg, type, this.sock);
+        }
       }
-
-      // Save state on every connection update
-      this.saveStateToFile();
-    });
+    }
   }
 
   // Auto-initialize connection on startup if auth exists
   async autoStartIfPossible(): Promise<boolean> {
     try {
-      const authDir = `auth_info_baileys_${this.userId}`;
-      // Check if we have existing auth credentials for this user
-      if (fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0) {
-        console.log(
-          `📱 Found existing WhatsApp auth for user ${this.userId}, attempting auto-connection...`
+      // Check if we have existing auth credentials in Supabase for this user
+      const { data, error } = await supabaseAdmin
+        .from("whatsapp_auth_creds")
+        .select("id")
+        .eq("user_id", this.userId)
+        .single();
+
+      if (data && !error) {
+        logger.info(
+          {
+            userId: this.userId,
+          },
+          "Found existing WhatsApp auth, attempting auto-connection"
         );
         await this.startConnection();
         return true;
       } else {
-        console.log(
-          `📱 No existing WhatsApp auth found for user ${this.userId}, manual connection required`
+        logger.info(
+          {
+            userId: this.userId,
+          },
+          "No existing WhatsApp auth found, manual connection required"
         );
         return false;
       }
     } catch (error) {
-      console.error("Failed to auto-start WhatsApp connection:", error);
+      logger.error(
+        {
+          userId: this.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to auto-start WhatsApp connection"
+      );
       return false;
     }
   }
 
   getConnectionStatus() {
+    const isConnected = this.connectionState === "open" && this.isAuthenticated;
+
     return {
-      isConnected: this.isConnected,
+      isConnected,
       qrCode: this.latestQR,
       socketActive: !!this.sock,
-      status: this.isConnected
+      connectionState: this.connectionState,
+      isAuthenticated: this.isAuthenticated,
+      status: isConnected
         ? "connected"
         : this.latestQR
         ? "qr_ready"
+        : this.connectionState === "connecting"
+        ? "connecting"
         : "disconnected",
-      message: this.isConnected
+      message: isConnected
         ? "WhatsApp is connected"
         : this.latestQR
         ? "QR code ready"
+        : this.connectionState === "connecting"
+        ? "Connecting to WhatsApp..."
         : "Not connected",
     };
   }
@@ -254,7 +353,9 @@ export class WhatsAppService {
     isConnected: boolean;
     qrCode: string | null;
   }> {
-    if (this.isConnected) {
+    const isConnected = this.connectionState === "open" && this.isAuthenticated;
+
+    if (isConnected) {
       return {
         status: "connected",
         message: "WhatsApp is connected",
@@ -263,10 +364,10 @@ export class WhatsAppService {
       };
     }
 
-    if (!this.sock) {
+    if (!this.sock && !this.isInitializing) {
       await this.startConnection();
-      // Wait a moment for QR to be generated
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      // Wait a moment for QR to be generated or connection to establish
+      await new Promise((resolve) => setTimeout(resolve, 2000));
 
       if (this.latestQR) {
         return {
@@ -274,6 +375,13 @@ export class WhatsAppService {
           message: "QR code ready. Please scan it.",
           isConnected: false,
           qrCode: this.latestQR,
+        };
+      } else if (this.connectionState === "open") {
+        return {
+          status: "connected",
+          message: "WhatsApp is connected",
+          isConnected: true,
+          qrCode: null,
         };
       } else {
         return {
@@ -292,8 +400,12 @@ export class WhatsAppService {
       };
     } else {
       return {
-        status: "connecting",
-        message: "Connecting to WhatsApp...",
+        status:
+          this.connectionState === "connecting" ? "connecting" : "disconnected",
+        message:
+          this.connectionState === "connecting"
+            ? "Connecting to WhatsApp..."
+            : "Not connected",
         isConnected: false,
         qrCode: null,
       };
@@ -310,8 +422,14 @@ export class WhatsAppService {
       const groupMetadata = await sock.groupMetadata(msg.key.remoteJid);
       const groupName = groupMetadata.subject;
 
-      console.log(
-        `📝 Group: "${groupName}" (${msg.key.remoteJid}), Type: ${type}`
+      logger.debug(
+        {
+          userId: this.userId,
+          groupName,
+          groupId: msg.key.remoteJid,
+          messageType: type,
+        },
+        "Processing group message"
       );
 
       // Check if this is a target group (check both group ID and group name for backward compatibility)
@@ -322,14 +440,28 @@ export class WhatsAppService {
       );
 
       if (!isTargetGroup) {
-        console.log(`❌ Group "${groupName}" not in target list - skipping`);
+        logger.debug(
+          {
+            userId: this.userId,
+            groupName,
+            targetGroups: this.targetGroups,
+          },
+          "Group not in target list, skipping"
+        );
         return;
       }
 
       const isHistorical = type === "append";
       const messageType = isHistorical ? "HISTORICAL" : "NEW";
 
-      console.log(`✅ ${messageType} message from target group "${groupName}"`);
+      logger.info(
+        {
+          userId: this.userId,
+          groupName,
+          messageType,
+        },
+        "Processing message from target group"
+      );
 
       // Safely serialize the message content to avoid JSON serialization issues
       const serializedMessage = this.serializeMessage(msg.message);
@@ -340,22 +472,37 @@ export class WhatsAppService {
       // Filter message to check if it's a property listing
       const filterResult = PropertyMessageFilter.filterMessage(messageText);
 
-      console.log(
-        `🔍 Property Filter Result: ${
-          filterResult.isPropertyListing ? "PROPERTY" : "NOT PROPERTY"
-        } (${Math.round(filterResult.confidence * 100)}%)`
+      logger.debug(
+        {
+          userId: this.userId,
+          isPropertyListing: filterResult.isPropertyListing,
+          confidence: filterResult.confidence,
+          matchedKeywords: filterResult.matchedKeywords.length,
+          matchedPatterns: filterResult.matchedPatterns.length,
+        },
+        "Property filter result"
       );
 
       // Only store property listings in the database
       if (!filterResult.isPropertyListing) {
-        console.log(`❌ Skipping non-property message: ${filterResult.reason}`);
+        logger.debug(
+          {
+            userId: this.userId,
+            reason: filterResult.reason,
+          },
+          "Skipping non-property message"
+        );
         return;
       }
 
-      console.log(
-        `✅ Storing property message - Keywords: ${filterResult.matchedKeywords
-          .slice(0, 3)
-          .join(", ")}, Patterns: ${filterResult.matchedPatterns.join(", ")}`
+      logger.info(
+        {
+          userId: this.userId,
+          confidence: filterResult.confidence,
+          matchedKeywords: filterResult.matchedKeywords.slice(0, 3),
+          matchedPatterns: filterResult.matchedPatterns,
+        },
+        "Storing property message"
       );
 
       // Create a hash to identify duplicate messages
@@ -371,8 +518,12 @@ export class WhatsAppService {
       );
 
       if (existingMessage) {
-        console.log(
-          `🔄 Duplicate message detected - skipping (already exists from group: ${existingMessage.group_name})`
+        logger.info(
+          {
+            userId: this.userId,
+            existingGroupName: existingMessage.group_name,
+          },
+          "Duplicate message detected, skipping"
         );
         return;
       }
@@ -392,17 +543,20 @@ export class WhatsAppService {
 
       // Store in Supabase for ALL users to access
       try {
-        console.log("� Storing property message:", {
-          user_id: messageData.user_id,
-          group_name: messageData.group_name,
-          sender: messageData.sender,
-          message_text:
-            messageText.substring(0, 50) +
-            (messageText.length > 50 ? "..." : ""),
-          filterConfidence: filterResult.confidence,
-          matchedKeywords: filterResult.matchedKeywords.length,
-          matchedPatterns: filterResult.matchedPatterns.length,
-        });
+        logger.info(
+          {
+            userId: messageData.user_id,
+            groupName: messageData.group_name,
+            sender: messageData.sender,
+            messagePreview:
+              messageText.substring(0, 50) +
+              (messageText.length > 50 ? "..." : ""),
+            filterConfidence: filterResult.confidence,
+            matchedKeywords: filterResult.matchedKeywords.length,
+            matchedPatterns: filterResult.matchedPatterns.length,
+          },
+          "Storing property message in database"
+        );
 
         const { data, error } = await supabaseAdmin
           .from("whatsapp_messages")
@@ -410,38 +564,64 @@ export class WhatsAppService {
           .select();
 
         if (error) {
-          console.error("Failed to store message in Supabase:", error);
-          console.error("Error details:", {
-            code: error.code,
-            message: error.message,
-            details: error.details,
-            hint: error.hint,
-          });
+          logger.error(
+            {
+              userId: this.userId,
+              error: {
+                code: error.code,
+                message: error.message,
+                details: error.details,
+                hint: error.hint,
+              },
+            },
+            "Failed to store message in Supabase"
+          );
           // Fall back to file logging
           this.logToFile(messageData, messageType);
         } else {
-          console.log(`💾 Message stored in Supabase:`, data[0]?.id);
+          logger.info(
+            {
+              userId: this.userId,
+              messageId: data[0]?.id,
+            },
+            "Message stored in Supabase successfully"
+          );
         }
       } catch (error) {
-        console.error("Failed to store message in Supabase:", error);
+        logger.error(
+          {
+            userId: this.userId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "Failed to store message in Supabase"
+        );
         // Fall back to file logging
         this.logToFile(messageData, messageType);
       }
 
-      // Always log to console
-      console.log(
-        `[${messageType}] 🏠 [${messageData.timestamp}] [${messageData.group_name}] [${messageData.sender}]: ${messageText}`
-      );
-
-      console.log(
-        `   � Stored property message with ${Math.round(
-          filterResult.confidence * 100
-        )}% confidence`
+      // Log the property message details
+      logger.info(
+        {
+          userId: this.userId,
+          messageType,
+          timestamp: messageData.timestamp,
+          groupName: messageData.group_name,
+          sender: messageData.sender,
+          messageText:
+            messageText.substring(0, 100) +
+            (messageText.length > 100 ? "..." : ""),
+          confidence: Math.round(filterResult.confidence * 100),
+        },
+        "Property message processed"
       );
     } catch (error) {
-      console.error(
-        `Failed to process message from ${msg.key.remoteJid}:`,
-        error
+      logger.error(
+        {
+          userId: this.userId,
+          groupId: msg.key.remoteJid,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to process message"
       );
     }
   }
@@ -458,7 +638,13 @@ export class WhatsAppService {
 
   updateTargetGroups(groups: string[]) {
     this.targetGroups = groups;
-    console.log(`🎯 Target groups updated:`, this.targetGroups);
+    logger.info(
+      {
+        userId: this.userId,
+        targetGroups: this.targetGroups,
+      },
+      "Target groups updated"
+    );
   }
 
   getTargetGroups(): string[] {
@@ -468,63 +654,115 @@ export class WhatsAppService {
   async cleanup(): Promise<void> {
     try {
       if (this.sock) {
-        console.log("🧹 Cleaning up WhatsApp connection...");
-        // Remove specific event listeners
-        this.sock.ev.removeAllListeners("messages.upsert");
-        this.sock.ev.removeAllListeners("connection.update");
-        this.sock.ev.removeAllListeners("creds.update");
+        logger.info(
+          {
+            userId: this.userId,
+          },
+          "Cleaning up WhatsApp connection"
+        );
+        // The new event system automatically handles cleanup
+        // No need to manually remove listeners as we're using sock.ev.process()
         this.sock = undefined;
       }
 
-      // Save final state
-      this.isConnected = false;
-      this.saveStateToFile();
+      // Reset state
+      this.connectionState = "close";
+      this.isAuthenticated = false;
 
-      console.log("✅ WhatsApp service cleanup completed");
+      logger.info(
+        {
+          userId: this.userId,
+        },
+        "WhatsApp service cleanup completed"
+      );
     } catch (error) {
-      console.error("Error during WhatsApp cleanup:", error);
+      logger.error(
+        {
+          userId: this.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Error during WhatsApp cleanup"
+      );
     }
   }
 
   async handleLogout(): Promise<void> {
     try {
-      console.log(`🧹 Handling logout for user ${this.userId}`);
+      logger.info(
+        {
+          userId: this.userId,
+        },
+        "Handling logout, cleaning up auth data"
+      );
 
       // Clean up socket connection
       await this.cleanup();
 
-      // Remove auth directory and files
-      const authDir = path.join(
-        process.cwd(),
-        `auth_info_baileys_${this.userId}`
-      );
-      if (fs.existsSync(authDir)) {
-        console.log(`🗑️ Removing auth directory: ${authDir}`);
-        fs.rmSync(authDir, { recursive: true, force: true });
+      // Remove auth data from Supabase
+      const { error: credsError } = await supabaseAdmin
+        .from("whatsapp_auth_creds")
+        .delete()
+        .eq("user_id", this.userId);
+
+      if (credsError) {
+        logger.warn(
+          {
+            userId: this.userId,
+            error: credsError,
+          },
+          "Failed to delete credentials"
+        );
+      } else {
+        logger.info(
+          {
+            userId: this.userId,
+          },
+          "Removed auth credentials"
+        );
       }
 
-      // Remove persisted state file
-      const stateDir = path.join(process.cwd(), "whatsapp-state");
-      const stateFile = path.join(
-        stateDir,
-        `whatsapp-state-${this.userId}.json`
-      );
-      if (fs.existsSync(stateFile)) {
-        console.log(`🗑️ Removing state file: ${stateFile}`);
-        fs.unlinkSync(stateFile);
+      const { error: keysError } = await supabaseAdmin
+        .from("whatsapp_auth_keys")
+        .delete()
+        .eq("user_id", this.userId);
+
+      if (keysError) {
+        logger.warn(
+          {
+            userId: this.userId,
+            error: keysError,
+          },
+          "Failed to delete keys"
+        );
+      } else {
+        logger.info(
+          {
+            userId: this.userId,
+          },
+          "Removed auth keys"
+        );
       }
 
       // Reset internal state
-      this.isConnected = false;
+      this.connectionState = "close";
+      this.isAuthenticated = false;
       this.latestQR = null;
-      this.reconnectAttempts = 0;
       this.targetGroups = [];
+      this.authState = undefined;
 
-      console.log(`✅ Logout cleanup completed for user ${this.userId}`);
+      logger.info(
+        {
+          userId: this.userId,
+        },
+        "Logout cleanup completed"
+      );
     } catch (error) {
-      console.error(
-        `❌ Error during logout cleanup for user ${this.userId}:`,
-        error
+      logger.error(
+        {
+          userId: this.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Error during logout cleanup"
       );
     }
   }
@@ -559,7 +797,13 @@ export class WhatsAppService {
         })
       );
     } catch (error) {
-      console.warn("Failed to serialize message, using fallback:", error);
+      logger.warn(
+        {
+          error: error instanceof Error ? error.message : String(error),
+          messageType: typeof message,
+        },
+        "Failed to serialize message, using fallback"
+      );
       // Fallback: extract just the text content if possible
       if (message.conversation) {
         return { conversation: message.conversation };
@@ -644,7 +888,12 @@ export class WhatsAppService {
       // Default fallback
       return "[Unknown Message Type]";
     } catch (error) {
-      console.warn("Failed to extract message text:", error);
+      logger.warn(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to extract message text"
+      );
       return "[Error extracting message]";
     }
   }
@@ -659,9 +908,12 @@ export class WhatsAppService {
         .eq("is_enabled", true);
 
       if (error) {
-        console.warn(
-          `Failed to load group preferences for user ${this.userId}:`,
-          error
+        logger.warn(
+          {
+            userId: this.userId,
+            error,
+          },
+          "Failed to load group preferences, using defaults"
         );
         // Fall back to default groups if database query fails
         this.targetGroups = ["test", "Real Estate Connect"];
@@ -671,22 +923,35 @@ export class WhatsAppService {
       if (data && data.length > 0) {
         // Store group IDs for efficient matching
         this.targetGroups = data.map((row) => row.group_id);
-        console.log(
-          `📂 Loaded ${this.targetGroups.length} target groups for user ${this.userId}:`,
-          data.map((row) => `${row.group_name} (${row.group_id})`)
+        logger.info(
+          {
+            userId: this.userId,
+            groupCount: this.targetGroups.length,
+            groups: data.map((row) => ({
+              name: row.group_name,
+              id: row.group_id,
+            })),
+          },
+          "Loaded target groups for user"
         );
       } else {
         // No preferences set yet, use default groups (these will be group names until user sets preferences)
         this.targetGroups = ["test", "Real Estate Connect"];
-        console.log(
-          `📂 No group preferences found for user ${this.userId}, using defaults:`,
-          this.targetGroups
+        logger.info(
+          {
+            userId: this.userId,
+            targetGroups: this.targetGroups,
+          },
+          "No group preferences found, using defaults"
         );
       }
     } catch (error) {
-      console.error(
-        `Error loading group preferences for user ${this.userId}:`,
-        error
+      logger.error(
+        {
+          userId: this.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Error loading group preferences, using defaults"
       );
       // Fall back to default groups
       this.targetGroups = ["test", "Real Estate Connect"];
@@ -697,7 +962,7 @@ export class WhatsAppService {
   async getAvailableGroups(): Promise<
     { group_id: string; group_name: string }[]
   > {
-    if (!this.sock || !this.isConnected) {
+    if (!this.sock || this.connectionState !== "open") {
       throw new Error("WhatsApp not connected");
     }
 
@@ -710,7 +975,13 @@ export class WhatsAppService {
         group_name: groups[groupId].subject || "Unknown Group",
       }));
     } catch (error) {
-      console.error("Error fetching available groups:", error);
+      logger.error(
+        {
+          userId: this.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Error fetching available groups"
+      );
       throw error;
     }
   }
@@ -726,13 +997,25 @@ export class WhatsAppService {
         .eq("user_id", this.userId);
 
       if (error) {
-        console.error("Error fetching user group preferences:", error);
+        logger.error(
+          {
+            userId: this.userId,
+            error,
+          },
+          "Error fetching user group preferences"
+        );
         return [];
       }
 
       return data || [];
     } catch (error) {
-      console.error("Error fetching user group preferences:", error);
+      logger.error(
+        {
+          userId: this.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Error fetching user group preferences"
+      );
       return [];
     }
   }
@@ -767,9 +1050,21 @@ export class WhatsAppService {
       // Reload the target groups
       await this.loadUserGroupPreferences();
 
-      console.log(`✅ Updated group preferences for user ${this.userId}`);
+      logger.info(
+        {
+          userId: this.userId,
+          preferenceCount: preferences.length,
+        },
+        "Updated group preferences"
+      );
     } catch (error) {
-      console.error("Error updating user group preferences:", error);
+      logger.error(
+        {
+          userId: this.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Error updating user group preferences"
+      );
       throw error;
     }
   }
@@ -803,13 +1098,25 @@ export class WhatsAppService {
         .limit(1);
 
       if (error) {
-        console.error("Error checking for duplicate message:", error);
+        logger.error(
+          {
+            userId,
+            error,
+          },
+          "Error checking for duplicate message"
+        );
         return null;
       }
 
       return data && data.length > 0 ? data[0] : null;
     } catch (error) {
-      console.error("Error checking for duplicate message:", error);
+      logger.error(
+        {
+          userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Error checking for duplicate message"
+      );
       return null;
     }
   }
